@@ -22,24 +22,24 @@ st.success("연결 성공!")
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pathlib import Path
 import unicodedata
 import io
 
-# =========================
-# Streamlit 기본 설정
-# =========================
+# ===============================
+# 기본 설정
+# ===============================
 st.set_page_config(
-    page_title="극지식물 최적 EC 농도 연구",
+    page_title="남곤 물고기 남덩이",
     layout="wide"
 )
 
-# =========================
-# 한글 폰트 깨짐 방지 (CSS)
-# =========================
+# ===============================
+# 한글 폰트 (Streamlit)
+# ===============================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR&display=swap');
@@ -49,269 +49,202 @@ html, body, [class*="css"] {
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# 공통 설정
-# =========================
-DATA_DIR = Path("data")
+st.title("🐟 남곤 물고기 남덩이")
+st.caption("극지식물 최적 EC 농도 연구 대시보드")
 
-SCHOOL_EC = {
-    "송도고": 1.0,
-    "하늘고": 2.0,
-    "아라고": 4.0,
-    "동산고": 8.0
-}
+# ===============================
+# 유틸: NFC/NFD 파일 탐색
+# ===============================
+def normalize_name(name: str, form: str):
+    return unicodedata.normalize(form, name)
 
-SCHOOL_COLOR = {
-    "송도고": "#1f77b4",
-    "하늘고": "#2ca02c",
-    "아라고": "#ff7f0e",
-    "동산고": "#d62728"
-}
-
-# =========================
-# 파일 탐색 (NFC/NFD 안전)
-# =========================
-def find_file(target_name: str):
-    target_nfc = unicodedata.normalize("NFC", target_name)
-    target_nfd = unicodedata.normalize("NFD", target_name)
-
-    for f in DATA_DIR.iterdir():
-        fname_nfc = unicodedata.normalize("NFC", f.name)
-        fname_nfd = unicodedata.normalize("NFD", f.name)
-        if fname_nfc == target_nfc or fname_nfd == target_nfd:
-            return f
+def find_file_by_name(directory: Path, target_name: str):
+    for file in directory.iterdir():
+        if normalize_name(file.name, "NFC") == normalize_name(target_name, "NFC"):
+            return file
+        if normalize_name(file.name, "NFD") == normalize_name(target_name, "NFD"):
+            return file
     return None
 
-# =========================
+# ===============================
 # 데이터 로딩
-# =========================
+# ===============================
 @st.cache_data
-def load_environment_data():
-    data = {}
-    for school in SCHOOL_EC.keys():
-        file_path = find_file(f"{school}_환경데이터.csv")
+def load_env_data():
+    data_dir = Path("data")
+    school_files = {
+        "송도고": "송도고_환경데이터.csv",
+        "하늘고": "하늘고_환경데이터.csv",
+        "아라고": "아라고_환경데이터.csv",
+        "동산고": "동산고_환경데이터.csv",
+    }
+
+    env_data = {}
+    for school, fname in school_files.items():
+        file_path = find_file_by_name(data_dir, fname)
         if file_path is None:
             st.error(f"❌ {school} 환경 데이터 파일을 찾을 수 없습니다.")
-            continue
+            return None
+
         df = pd.read_csv(file_path)
-        df["학교"] = school
-        data[school] = df
-    return data
+        df["time"] = pd.to_datetime(df["time"])
+        df = df.sort_values("time")
+
+        # 결측치 보정
+        df = df.interpolate(method="linear")
+
+        # IQR 이상치 제거
+        for col in ["temperature", "humidity", "ph", "ec"]:
+            q1 = df[col].quantile(0.25)
+            q3 = df[col].quantile(0.75)
+            iqr = q3 - q1
+            df = df[(df[col] >= q1 - 1.5 * iqr) & (df[col] <= q3 + 1.5 * iqr)]
+
+        env_data[school] = df
+
+    return env_data
 
 @st.cache_data
 def load_growth_data():
-    file_path = find_file("4개교_생육결과데이터.xlsx")
-    if file_path is None:
+    data_dir = Path("data")
+    xlsx_path = find_file_by_name(data_dir, "4개교_생육결과데이터.xlsx")
+    if xlsx_path is None:
         st.error("❌ 생육 결과 XLSX 파일을 찾을 수 없습니다.")
-        return {}
+        return None
 
-    xls = pd.ExcelFile(file_path, engine="openpyxl")
-    data = {}
+    xls = pd.ExcelFile(xlsx_path, engine="openpyxl")
+    growth = {}
     for sheet in xls.sheet_names:
-        df = pd.read_excel(xls, sheet_name=sheet)
-        df["학교"] = sheet
-        df["EC"] = SCHOOL_EC.get(sheet, None)
-        data[sheet] = df
-    return data
+        growth[sheet] = pd.read_excel(xls, sheet_name=sheet)
+    return growth
 
-# =========================
-# 데이터 로딩
-# =========================
-with st.spinner("📂 데이터 로딩 중..."):
-    env_data = load_environment_data()
+with st.spinner("📊 데이터 로딩 중..."):
+    env_data = load_env_data()
     growth_data = load_growth_data()
 
-if not env_data or not growth_data:
+if env_data is None or growth_data is None:
     st.stop()
 
-# =========================
-# 제목
-# =========================
-st.title("🌱 극지식물 최적 EC 농도 연구")
-
-# =========================
+# ===============================
 # 사이드바
-# =========================
-selected_school = st.sidebar.selectbox(
-    "🏫 학교 선택",
-    ["전체"] + list(SCHOOL_EC.keys())
+# ===============================
+school_option = st.sidebar.selectbox(
+    "학교 선택",
+    ["전체", "송도고", "하늘고", "아라고", "동산고"]
 )
 
-# =========================
+selected_schools = list(env_data.keys()) if school_option == "전체" else [school_option]
+
+# ===============================
 # 탭 구성
-# =========================
-tab1, tab2, tab3 = st.tabs(["📖 실험 개요", "🌡️ 환경 데이터", "📊 생육 결과"])
+# ===============================
+tab1, tab2, tab3 = st.tabs([
+    "📈 pH/EC 변화",
+    "📉 선형회귀 분석",
+    "🔁 pH-EC 쌍곡선 관계"
+])
 
-# ======================================================
-# Tab 1 : 실험 개요
-# ======================================================
+# ===============================
+# Tab 1: 시간에 따른 변화
+# ===============================
 with tab1:
-    st.subheader("연구 배경 및 목적")
-    st.write(
-        """
-        본 연구는 **극지식물의 최적 EC(전기전도도) 농도**를 규명하기 위해  
-        4개 학교에서 서로 다른 EC 조건 하에 환경 데이터와 생육 결과를 비교·분석하였다.
-        """
-    )
-
-    info_df = pd.DataFrame([
-        {
-            "학교명": s,
-            "EC 목표": SCHOOL_EC[s],
-            "개체수": len(growth_data[s]),
-            "색상": SCHOOL_COLOR[s]
-        } for s in SCHOOL_EC
-    ])
-
-    st.dataframe(info_df, use_container_width=True)
-
-    total_count = sum(len(df) for df in growth_data.values())
-    avg_temp = pd.concat(env_data.values())["temperature"].mean()
-    avg_hum = pd.concat(env_data.values())["humidity"].mean()
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("총 개체수", f"{total_count}개")
-    col2.metric("평균 온도", f"{avg_temp:.1f} ℃")
-    col3.metric("평균 습도", f"{avg_hum:.1f} %")
-    col4.metric("최적 EC", "2.0 (하늘고) ⭐")
-
-# ======================================================
-# Tab 2 : 환경 데이터
-# ======================================================
-with tab2:
-    st.subheader("학교별 환경 데이터 비교")
-
-    env_all = pd.concat(env_data.values())
-
-    avg_env = env_all.groupby("학교").mean(numeric_only=True).reset_index()
-
     fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=("평균 온도", "평균 습도", "평균 pH", "목표 EC vs 실측 EC")
+        rows=2, cols=1,
+        shared_xaxes=True,
+        subplot_titles=("시간에 따른 pH 변화", "시간에 따른 EC 변화")
     )
 
-    fig.add_bar(x=avg_env["학교"], y=avg_env["temperature"], row=1, col=1)
-    fig.add_bar(x=avg_env["학교"], y=avg_env["humidity"], row=1, col=2)
-    fig.add_bar(x=avg_env["학교"], y=avg_env["ph"], row=2, col=1)
-
-    fig.add_bar(x=avg_env["학교"], y=avg_env["ec"], name="실측 EC", row=2, col=2)
-    fig.add_bar(
-        x=list(SCHOOL_EC.keys()),
-        y=list(SCHOOL_EC.values()),
-        name="목표 EC",
-        row=2, col=2
-    )
+    for school in selected_schools:
+        df = env_data[school]
+        fig.add_trace(
+            go.Scatter(x=df["time"], y=df["ph"], name=f"{school} pH"),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=df["time"], y=df["ec"], name=f"{school} EC"),
+            row=2, col=1
+        )
 
     fig.update_layout(
         height=700,
-        font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif"),
-        showlegend=True
+        font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif")
     )
-
     st.plotly_chart(fig, use_container_width=True)
 
-    if selected_school != "전체":
-        df = env_data[selected_school]
+# ===============================
+# Tab 2: 선형회귀
+# ===============================
+with tab2:
+    all_df = pd.concat(env_data.values(), ignore_index=True)
 
-        fig_ts = go.Figure()
-        fig_ts.add_scatter(x=df["time"], y=df["temperature"], name="온도")
-        fig_ts.add_scatter(x=df["time"], y=df["humidity"], name="습도")
-        fig_ts.add_scatter(x=df["time"], y=df["ec"], name="EC")
-        fig_ts.add_hline(
-            y=SCHOOL_EC[selected_school],
-            line_dash="dash",
-            annotation_text="목표 EC"
-        )
+    t = np.arange(len(all_df))
+    ph_coef = np.polyfit(t, all_df["ph"], 1)
+    ec_coef = np.polyfit(t, all_df["ec"], 1)
 
-        fig_ts.update_layout(
-            title=f"{selected_school} 시계열 변화",
-            font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif")
-        )
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=("pH 선형회귀", "EC 선형회귀")
+    )
 
-        st.plotly_chart(fig_ts, use_container_width=True)
+    fig.add_trace(go.Scatter(y=all_df["ph"], mode="markers", name="pH"), row=1, col=1)
+    fig.add_trace(go.Scatter(y=ph_coef[0]*t + ph_coef[1], name="Regression"), row=1, col=1)
 
-    with st.expander("📄 환경 데이터 원본"):
-        st.dataframe(env_all, use_container_width=True)
+    fig.add_trace(go.Scatter(y=all_df["ec"], mode="markers", name="EC"), row=2, col=1)
+    fig.add_trace(go.Scatter(y=ec_coef[0]*t + ec_coef[1], name="Regression"), row=2, col=1)
 
-        csv_buffer = io.BytesIO()
-        env_all.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
+    fig.update_layout(
+        height=700,
+        font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif")
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-        st.download_button(
-            "CSV 다운로드",
-            data=csv_buffer,
-            file_name="환경데이터_전체.csv",
-            mime="text/csv"
-        )
+    st.info(f"""
+- pH 기울기: **{ph_coef[0]:.5f}**
+- EC 기울기: **{ec_coef[0]:.5f}**
+    """)
 
-# ======================================================
-# Tab 3 : 생육 결과
-# ======================================================
+# ===============================
+# Tab 3: 쌍곡선 함수
+# ===============================
 with tab3:
-    growth_all = pd.concat(growth_data.values())
+    ph = all_df["ph"]
+    ec = all_df["ec"]
 
-    avg_weight = growth_all.groupby("EC")["생중량(g)"].mean().reset_index()
-    best_ec = avg_weight.loc[avg_weight["생중량(g)"].idxmax(), "EC"]
+    coef = np.polyfit(1/ph, ec, 1)
+    ec_pred = coef[0] * (1/ph) + coef[1]
 
-    st.metric("🥇 평균 생중량 최고 EC", f"{best_ec}")
+    corr = np.corrcoef(ph, ec)[0, 1]
 
-    fig_bar = px.bar(
-        avg_weight,
-        x="EC",
-        y="생중량(g)",
-        title="EC별 평균 생중량",
-        text_auto=".2f"
-    )
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ph, y=ec, mode="markers", name="Observed"))
+    fig.add_trace(go.Scatter(x=ph, y=ec_pred, mode="lines", name="Hyperbolic Fit"))
 
-    fig_bar.update_layout(
+    fig.update_layout(
+        title="pH-EC 쌍곡선 관계",
+        xaxis_title="pH",
+        yaxis_title="EC",
         font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif")
     )
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.success(f"""
+회귀식:
+EC = {coef[1]:.3f} + {coef[0]:.3f} × (1/pH)
 
-    fig_box = px.box(
-        growth_all,
-        x="학교",
-        y="생중량(g)",
-        color="학교",
-        title="학교별 생중량 분포"
-    )
+상관계수: **{corr:.2f}**
+    """)
 
-    fig_box.update_layout(
-        font=dict(family="Malgun Gothic, Apple SD Gothic Neo, sans-serif")
-    )
+# ===============================
+# XLSX 다운로드
+# ===============================
+st.subheader("📥 데이터 다운로드")
+buffer = io.BytesIO()
+all_df.to_excel(buffer, index=False, engine="openpyxl")
+buffer.seek(0)
 
-    st.plotly_chart(fig_box, use_container_width=True)
-
-    fig_scatter1 = px.scatter(
-        growth_all,
-        x="잎 수(장)",
-        y="생중량(g)",
-        color="학교",
-        title="잎 수 vs 생중량"
-    )
-
-    fig_scatter2 = px.scatter(
-        growth_all,
-        x="지상부 길이(mm)",
-        y="생중량(g)",
-        color="학교",
-        title="지상부 길이 vs 생중량"
-    )
-
-    st.plotly_chart(fig_scatter1, use_container_width=True)
-    st.plotly_chart(fig_scatter2, use_container_width=True)
-
-    with st.expander("📄 생육 데이터 원본"):
-        st.dataframe(growth_all, use_container_width=True)
-
-        buffer = io.BytesIO()
-        growth_all.to_excel(buffer, index=False, engine="openpyxl")
-        buffer.seek(0)
-
-        st.download_button(
-            "XLSX 다운로드",
-            data=buffer,
-            file_name="생육결과_전체.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+st.download_button(
+    label="통합 환경 데이터 다운로드 (XLSX)",
+    data=buffer,
+    file_name="통합_환경데이터.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
